@@ -17,6 +17,8 @@ limitations under the License.
 // © Siemens AG, 2018, Dr. Martin Bischoff (martin.bischoff@siemens.com)
 
 using UnityEngine;
+using System.Collections.Generic;
+using AsyncGPUReadbackPluginNs;
 
 namespace RosSharp.RosBridgeClient
 {
@@ -28,10 +30,12 @@ namespace RosSharp.RosBridgeClient
         public int resolutionHeight = 480;
         [Range(0, 100)]
         public int qualityLevel = 50;
+        public int frameRate = 15;
 
         private MessageTypes.Sensor.CompressedImage message;
         private Texture2D texture2D;
-        private Rect rect;
+        private Queue<AsyncGPUReadbackPluginRequest> requests = new Queue<AsyncGPUReadbackPluginRequest>();
+        private float updatePeriod = 0.0f;
 
         protected override void Start()
         {
@@ -39,19 +43,47 @@ namespace RosSharp.RosBridgeClient
             InitializeGameObject();
             InitializeMessage();
             Camera.onPostRender += UpdateImage;
+            updatePeriod = 1.0f / (float)frameRate;
         }
 
-        private void UpdateImage(Camera _camera)
+        private void Update()
         {
-            if (texture2D != null && _camera == this.ImageCamera)
-                UpdateMessage();
+            if(requests.Count > 0)
+            {
+                var req = requests.Peek();
+
+                // You need to explicitly ask for an update regularly
+    			req.Update();
+
+                if (req.hasError)
+                {
+                    Debug.Log("GPU readback error detected.");
+                }
+                else if (req.done)
+                {
+                    UpdateMessage(req);
+                }
+                else
+                {
+                    return;
+                }
+                req.Dispose();
+                requests.Dequeue();
+            }
+            while(requests.Count > 0)
+            {
+                var req = requests.Peek();
+    			req.Update();
+                req.GetRawData();
+                req.Dispose();
+                requests.Dequeue();
+            }
         }
 
         private void InitializeGameObject()
         {
-            texture2D = new Texture2D(resolutionWidth, resolutionHeight, TextureFormat.RGB24, false);
-            rect = new Rect(0, 0, resolutionWidth, resolutionHeight);
-            ImageCamera.targetTexture = new RenderTexture(resolutionWidth, resolutionHeight, 24);
+            texture2D = new Texture2D(resolutionWidth, resolutionHeight, TextureFormat.RGBA32, false);
+            ImageCamera.targetTexture = new RenderTexture(resolutionWidth, resolutionHeight, 24, RenderTextureFormat.ARGB32);
         }
 
         private void InitializeMessage()
@@ -61,13 +93,25 @@ namespace RosSharp.RosBridgeClient
             message.format = "jpeg";
         }
 
-        private void UpdateMessage()
+        private void UpdateMessage(AsyncGPUReadbackPluginRequest req)
         {
             message.header.Update();
-            texture2D.ReadPixels(rect, 0, 0);
+            byte[] buffer = req.GetRawData();
+            texture2D.LoadRawTextureData(buffer);
             message.data = texture2D.EncodeToJPG(qualityLevel);
             Publish(message);
         }
 
+        private void UpdateImage(Camera _camera)
+        {
+            if (Time.frameCount % 3 == 0)
+            {
+                if (texture2D != null && _camera == this.ImageCamera)
+                {
+                    Graphics.Blit(null, ImageCamera.targetTexture);
+                    requests.Enqueue(AsyncGPUReadbackPlugin.Request(ImageCamera.targetTexture));
+                }
+            }
+        }
     }
 }
